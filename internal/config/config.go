@@ -82,10 +82,14 @@ func (c *Config) normalize() error {
 	if c.Mode == "" {
 		c.Mode = "pool"
 	}
+	// Normalize mode name: support both multi-port and multi_port
+	if c.Mode == "multi_port" {
+		c.Mode = "multi-port"
+	}
 	switch c.Mode {
 	case "pool", "multi-port":
 	default:
-		return fmt.Errorf("unsupported mode %q", c.Mode)
+		return fmt.Errorf("unsupported mode %q (use 'pool' or 'multi-port')", c.Mode)
 	}
 	if c.Listener.Address == "" {
 		c.Listener.Address = "0.0.0.0"

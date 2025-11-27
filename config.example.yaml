@@ -1,4 +1,4 @@
-mode: pool
+mode: pool  # pool 或 multi-port（也支持 multi_port）
 log_level: info
 management:
   enabled: true
