@@ -275,8 +275,24 @@ func (m *Manager) SnapshotFiltered(onlyAvailable bool) []Snapshot {
 		}
 		snapshots = append(snapshots, snap)
 	}
+	// 按延迟排序（延迟小的在前面，未测试的排在最后）
 	sort.Slice(snapshots, func(i, j int) bool {
-		return snapshots[i].Name < snapshots[j].Name
+		latencyI := snapshots[i].LastLatencyMs
+		latencyJ := snapshots[j].LastLatencyMs
+		// -1 表示未测试，排在最后
+		if latencyI < 0 && latencyJ < 0 {
+			return snapshots[i].Name < snapshots[j].Name // 都未测试时按名称排序
+		}
+		if latencyI < 0 {
+			return false // i 未测试，排在后面
+		}
+		if latencyJ < 0 {
+			return true // j 未测试，i 排在前面
+		}
+		if latencyI == latencyJ {
+			return snapshots[i].Name < snapshots[j].Name // 延迟相同时按名称排序
+		}
+		return latencyI < latencyJ
 	})
 	return snapshots
 }

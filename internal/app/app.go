@@ -34,7 +34,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	// 根据模式选择代理用户名密码
 	proxyUsername := cfg.Listener.Username
 	proxyPassword := cfg.Listener.Password
-	if cfg.Mode == "multi_port" {
+	if cfg.Mode == "multi-port" {
 		proxyUsername = cfg.MultiPort.Username
 		proxyPassword = cfg.MultiPort.Password
 	}
