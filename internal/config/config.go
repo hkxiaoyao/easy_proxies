@@ -74,13 +74,23 @@ type SubscriptionRefreshConfig struct {
 	MinAvailableNodes  int           `yaml:"min_available_nodes"`  // 最少可用节点数，低于此值不切换
 }
 
+// NodeSource indicates where a node configuration originated from.
+type NodeSource string
+
+const (
+	NodeSourceInline       NodeSource = "inline"       // Defined directly in config.yaml nodes array
+	NodeSourceFile         NodeSource = "nodes_file"   // Loaded from external nodes file
+	NodeSourceSubscription NodeSource = "subscription" // Fetched from subscription URL
+)
+
 // NodeConfig describes a single upstream proxy endpoint expressed as URI.
 type NodeConfig struct {
-	Name     string `yaml:"name" json:"name"`
-	URI      string `yaml:"uri" json:"uri"`
-	Port     uint16 `yaml:"port,omitempty" json:"port,omitempty"`
-	Username string `yaml:"username,omitempty" json:"username,omitempty"`
-	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+	Name     string     `yaml:"name" json:"name"`
+	URI      string     `yaml:"uri" json:"uri"`
+	Port     uint16     `yaml:"port,omitempty" json:"port,omitempty"`
+	Username string     `yaml:"username,omitempty" json:"username,omitempty"`
+	Password string     `yaml:"password,omitempty" json:"password,omitempty"`
+	Source   NodeSource `yaml:"-" json:"source,omitempty"` // Runtime only, not persisted
 }
 
 // Load reads YAML config from disk and applies defaults/validation.
@@ -169,24 +179,53 @@ func (c *Config) normalize() error {
 		c.SubscriptionRefresh.MinAvailableNodes = 1
 	}
 
-	// Load nodes from file if specified
-	if c.NodesFile != "" {
+	// Mark inline nodes with source
+	for idx := range c.Nodes {
+		c.Nodes[idx].Source = NodeSourceInline
+	}
+
+	// Load nodes from file if specified (but NOT if subscriptions exist - subscription takes priority)
+	if c.NodesFile != "" && len(c.Subscriptions) == 0 {
 		fileNodes, err := loadNodesFromFile(c.NodesFile)
 		if err != nil {
 			return fmt.Errorf("load nodes from file %q: %w", c.NodesFile, err)
 		}
-		// Merge file nodes with config nodes
+		for idx := range fileNodes {
+			fileNodes[idx].Source = NodeSourceFile
+		}
 		c.Nodes = append(c.Nodes, fileNodes...)
 	}
 
-	// Load nodes from subscriptions
-	for _, subURL := range c.Subscriptions {
-		subNodes, err := loadNodesFromSubscription(subURL)
-		if err != nil {
-			log.Printf("⚠️ Failed to load subscription %q: %v (skipping)", subURL, err)
-			continue
+	// Load nodes from subscriptions (highest priority - writes to nodes.txt)
+	if len(c.Subscriptions) > 0 {
+		var subNodes []NodeConfig
+		for _, subURL := range c.Subscriptions {
+			nodes, err := loadNodesFromSubscription(subURL)
+			if err != nil {
+				log.Printf("⚠️ Failed to load subscription %q: %v (skipping)", subURL, err)
+				continue
+			}
+			log.Printf("✅ Loaded %d nodes from subscription", len(nodes))
+			subNodes = append(subNodes, nodes...)
 		}
-		log.Printf("✅ Loaded %d nodes from subscription", len(subNodes))
+		// Mark subscription nodes and write to nodes.txt
+		for idx := range subNodes {
+			subNodes[idx].Source = NodeSourceSubscription
+		}
+		if len(subNodes) > 0 {
+			// Determine nodes.txt path
+			nodesFilePath := c.NodesFile
+			if nodesFilePath == "" {
+				nodesFilePath = filepath.Join(filepath.Dir(c.filePath), "nodes.txt")
+				c.NodesFile = nodesFilePath
+			}
+			// Write subscription nodes to nodes.txt
+			if err := writeNodesToFile(nodesFilePath, subNodes); err != nil {
+				log.Printf("⚠️ Failed to write nodes to %q: %v", nodesFilePath, err)
+			} else {
+				log.Printf("✅ Written %d subscription nodes to %s", len(subNodes), nodesFilePath)
+			}
+		}
 		c.Nodes = append(c.Nodes, subNodes...)
 	}
 
@@ -617,10 +656,24 @@ func (c *Config) SetFilePath(path string) {
 	}
 }
 
-// Save persists the current config back to its source YAML file.
-// Note: When saving, nodes_file and subscriptions are cleared to prevent
-// duplicate nodes on next load (since their nodes are already in the Nodes slice).
-func (c *Config) Save() error {
+// writeNodesToFile writes nodes to a file (one URI per line).
+func writeNodesToFile(path string, nodes []NodeConfig) error {
+	var lines []string
+	for _, node := range nodes {
+		lines = append(lines, node.URI)
+	}
+	content := strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		content += "\n"
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// SaveNodes persists nodes to their appropriate locations based on source.
+// - subscription/nodes_file nodes → nodes.txt (or configured nodes_file)
+// - inline nodes → config.yaml nodes array
+// Config.yaml structure (subscriptions, nodes_file) is preserved.
+func (c *Config) SaveNodes() error {
 	if c == nil {
 		return errors.New("config is nil")
 	}
@@ -628,19 +681,70 @@ func (c *Config) Save() error {
 		return errors.New("config file path is unknown")
 	}
 
-	// Create a copy for saving to avoid modifying the running config
-	saveCfg := *c
-	// Clear external sources to prevent duplicate nodes on reload
-	// The nodes from these sources are already in saveCfg.Nodes
-	saveCfg.NodesFile = ""
-	saveCfg.Subscriptions = nil
+	// Separate nodes by source
+	var inlineNodes []NodeConfig
+	var fileNodes []NodeConfig
 
-	data, err := yaml.Marshal(&saveCfg)
-	if err != nil {
-		return fmt.Errorf("encode config: %w", err)
+	for _, node := range c.Nodes {
+		// Create a clean copy without runtime fields for saving
+		cleanNode := NodeConfig{
+			Name:     node.Name,
+			URI:      node.URI,
+			Port:     node.Port,
+			Username: node.Username,
+			Password: node.Password,
+		}
+		switch node.Source {
+		case NodeSourceInline:
+			inlineNodes = append(inlineNodes, cleanNode)
+		case NodeSourceFile, NodeSourceSubscription:
+			fileNodes = append(fileNodes, cleanNode)
+		default:
+			// Default to file nodes for unknown source
+			fileNodes = append(fileNodes, cleanNode)
+		}
 	}
-	if err := os.WriteFile(c.filePath, data, 0o644); err != nil {
-		return fmt.Errorf("write config: %w", err)
+
+	// Write file-based nodes to nodes.txt
+	if len(fileNodes) > 0 || c.NodesFile != "" {
+		nodesFilePath := c.NodesFile
+		if nodesFilePath == "" {
+			nodesFilePath = filepath.Join(filepath.Dir(c.filePath), "nodes.txt")
+		}
+		if err := writeNodesToFile(nodesFilePath, fileNodes); err != nil {
+			return fmt.Errorf("write nodes file %q: %w", nodesFilePath, err)
+		}
 	}
+
+	// Only update config.yaml if there are inline nodes to save
+	// and preserve the original config structure
+	if len(inlineNodes) > 0 {
+		// Read original config to preserve structure
+		data, err := os.ReadFile(c.filePath)
+		if err != nil {
+			return fmt.Errorf("read config: %w", err)
+		}
+		var saveCfg Config
+		if err := yaml.Unmarshal(data, &saveCfg); err != nil {
+			return fmt.Errorf("decode config: %w", err)
+		}
+		// Update only the inline nodes
+		saveCfg.Nodes = inlineNodes
+
+		newData, err := yaml.Marshal(&saveCfg)
+		if err != nil {
+			return fmt.Errorf("encode config: %w", err)
+		}
+		if err := os.WriteFile(c.filePath, newData, 0o644); err != nil {
+			return fmt.Errorf("write config: %w", err)
+		}
+	}
+
 	return nil
+}
+
+// Save is deprecated, use SaveNodes instead.
+// This method is kept for backward compatibility but now delegates to SaveNodes.
+func (c *Config) Save() error {
+	return c.SaveNodes()
 }

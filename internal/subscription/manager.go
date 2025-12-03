@@ -2,12 +2,16 @@ package subscription
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +49,9 @@ type Manager struct {
 	cancel        context.CancelFunc
 	refreshMu     sync.Mutex // prevents concurrent refreshes
 	manualRefresh chan struct{}
+
+	// Track nodes.txt content hash to detect modifications
+	lastSubHash string // Hash of nodes.txt content after last subscription refresh
 }
 
 // New creates a SubscriptionManager.
@@ -131,8 +138,12 @@ func (m *Manager) RefreshNow() error {
 // Status returns the current refresh status.
 func (m *Manager) Status() monitor.SubscriptionStatus {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.status
+	status := m.status
+	m.mu.RUnlock()
+
+	// Check if nodes have been modified since last refresh
+	status.NodesModified = m.CheckNodesModified()
+	return status
 }
 
 // refreshLoop runs the periodic refresh.
@@ -209,6 +220,25 @@ func (m *Manager) doRefresh() {
 
 	m.logger.Infof("fetched %d nodes from subscriptions", len(nodes))
 
+	// Write subscription nodes to nodes.txt
+	nodesFilePath := m.getNodesFilePath()
+	if err := m.writeNodesToFile(nodesFilePath, nodes); err != nil {
+		m.logger.Errorf("failed to write nodes.txt: %v", err)
+		m.mu.Lock()
+		m.status.LastError = fmt.Sprintf("write nodes.txt: %v", err)
+		m.status.LastRefresh = time.Now()
+		m.mu.Unlock()
+		return
+	}
+	m.logger.Infof("written %d nodes to %s", len(nodes), nodesFilePath)
+
+	// Update hash after writing
+	newHash := m.computeNodesHash(nodes)
+	m.mu.Lock()
+	m.lastSubHash = newHash
+	m.status.NodesModified = false
+	m.mu.Unlock()
+
 	// Create new config with updated nodes
 	newCfg := m.createNewConfig(nodes)
 
@@ -229,6 +259,79 @@ func (m *Manager) doRefresh() {
 	m.mu.Unlock()
 
 	m.logger.Infof("subscription refresh completed, %d nodes active", len(nodes))
+}
+
+// getNodesFilePath returns the path to nodes.txt.
+func (m *Manager) getNodesFilePath() string {
+	if m.baseCfg.NodesFile != "" {
+		return m.baseCfg.NodesFile
+	}
+	return filepath.Join(filepath.Dir(m.baseCfg.FilePath()), "nodes.txt")
+}
+
+// writeNodesToFile writes nodes to a file (one URI per line).
+func (m *Manager) writeNodesToFile(path string, nodes []config.NodeConfig) error {
+	var lines []string
+	for _, node := range nodes {
+		lines = append(lines, node.URI)
+	}
+	content := strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		content += "\n"
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// computeNodesHash computes a hash of node URIs for change detection.
+func (m *Manager) computeNodesHash(nodes []config.NodeConfig) string {
+	var uris []string
+	for _, node := range nodes {
+		uris = append(uris, node.URI)
+	}
+	content := strings.Join(uris, "\n")
+	hash := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(hash[:])
+}
+
+// CheckNodesModified checks if nodes.txt has been modified since last refresh.
+func (m *Manager) CheckNodesModified() bool {
+	m.mu.RLock()
+	lastHash := m.lastSubHash
+	m.mu.RUnlock()
+
+	if lastHash == "" {
+		return false // No previous refresh, can't determine modification
+	}
+
+	// Read current nodes.txt and compute hash
+	nodesFilePath := m.getNodesFilePath()
+	data, err := os.ReadFile(nodesFilePath)
+	if err != nil {
+		return false // File doesn't exist or can't read
+	}
+
+	// Parse nodes from file content
+	var nodes []config.NodeConfig
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if isProxyURI(line) {
+			nodes = append(nodes, config.NodeConfig{URI: line})
+		}
+	}
+
+	currentHash := m.computeNodesHash(nodes)
+	return currentHash != lastHash
+}
+
+// MarkNodesModified updates the modification status.
+func (m *Manager) MarkNodesModified() {
+	m.mu.Lock()
+	m.status.NodesModified = true
+	m.mu.Unlock()
 }
 
 // fetchAllSubscriptions fetches nodes from all configured subscription URLs.

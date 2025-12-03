@@ -44,12 +44,13 @@ type SubscriptionRefresher interface {
 
 // SubscriptionStatus represents subscription refresh status.
 type SubscriptionStatus struct {
-	LastRefresh  time.Time `json:"last_refresh"`
-	NextRefresh  time.Time `json:"next_refresh"`
-	NodeCount    int       `json:"node_count"`
-	LastError    string    `json:"last_error,omitempty"`
-	RefreshCount int       `json:"refresh_count"`
-	IsRefreshing bool      `json:"is_refreshing"`
+	LastRefresh   time.Time `json:"last_refresh"`
+	NextRefresh   time.Time `json:"next_refresh"`
+	NodeCount     int       `json:"node_count"`
+	LastError     string    `json:"last_error,omitempty"`
+	RefreshCount  int       `json:"refresh_count"`
+	IsRefreshing  bool      `json:"is_refreshing"`
+	NodesModified bool      `json:"nodes_modified"` // True if nodes.txt was modified since last refresh
 }
 
 // Server exposes HTTP endpoints for monitoring.

@@ -482,6 +482,16 @@ func (m *Manager) CreateNode(ctx context.Context, node config.NodeConfig) (confi
 		return config.NodeConfig{}, err
 	}
 
+	// Determine source: if subscriptions exist, new nodes go to nodes.txt (subscription source)
+	// Otherwise, if nodes_file exists, use file source; else inline
+	if len(m.cfg.Subscriptions) > 0 {
+		normalized.Source = config.NodeSourceSubscription
+	} else if m.cfg.NodesFile != "" {
+		normalized.Source = config.NodeSourceFile
+	} else {
+		normalized.Source = config.NodeSourceInline
+	}
+
 	m.cfg.Nodes = append(m.cfg.Nodes, normalized)
 	if err := m.cfg.Save(); err != nil {
 		m.cfg.Nodes = m.cfg.Nodes[:len(m.cfg.Nodes)-1]
@@ -515,6 +525,9 @@ func (m *Manager) UpdateNode(ctx context.Context, name string, node config.NodeC
 	if err != nil {
 		return config.NodeConfig{}, err
 	}
+
+	// Preserve the original source
+	normalized.Source = m.cfg.Nodes[idx].Source
 
 	prev := m.cfg.Nodes[idx]
 	m.cfg.Nodes[idx] = normalized

@@ -870,6 +870,10 @@
         ⚠️ 重载配置会中断所有现有连接，请谨慎操作
       </div>
 
+      <div id="subscriptionWarning" class="reload-warning" style="display: none; background: rgba(255, 59, 48, 0.1); border-color: rgba(255, 59, 48, 0.3); color: var(--error);">
+        ⚠️ 当前使用订阅模式：您的修改会保存到 nodes.txt，但下次刷新订阅时将被覆盖
+      </div>
+
       <div id="configNodesContainer" class="config-nodes-grid"></div>
 
       <div id="configEmptyState" class="empty" style="display: none;">
@@ -1285,6 +1289,26 @@
     }
 
     async function refreshSubscription() {
+      // Check if nodes have been modified since last refresh
+      try {
+        const statusRes = await fetch('/api/subscription/status');
+        if (statusRes.ok) {
+          const status = await statusRes.json();
+          if (status.nodes_modified) {
+            const confirmed = confirm(
+              '⚠️ 警告：节点配置已被修改\n\n' +
+              '刷新订阅将会覆盖您对 nodes.txt 的所有修改！\n\n' +
+              '确定要继续吗？'
+            );
+            if (!confirmed) {
+              return;
+            }
+          }
+        }
+      } catch (e) {
+        // Ignore status check errors, proceed with refresh
+      }
+
       const btn = document.getElementById('refreshSubBtn');
       const text = document.getElementById('refreshSubText');
 
@@ -1343,6 +1367,15 @@
         const data = await res.json();
         configNodes = data.nodes || [];
         renderConfigNodes();
+
+        // Check if subscription mode is active and show warning
+        const subWarning = document.getElementById('subscriptionWarning');
+        const hasSubscriptionNodes = configNodes.some(n => n.source === 'subscription');
+        if (hasSubscriptionNodes && subWarning) {
+          subWarning.style.display = 'block';
+        } else if (subWarning) {
+          subWarning.style.display = 'none';
+        }
       } catch (err) {
         showToast('加载配置节点失败: ' + err.message, 'error');
       }

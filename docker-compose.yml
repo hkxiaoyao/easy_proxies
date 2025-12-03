@@ -14,5 +14,5 @@ services:
     #   # Multi-port 模式端口范围（根据节点数量调整）
     #   - "24000-24100:24000-24100"
     volumes:
-      - ./config.yaml:/etc/easy-proxies/config.yaml:ro
-      - ./nodes.txt:/etc/easy-proxies/nodes.txt:ro
+      - ./config.yaml:/etc/easy-proxies/config.yaml
+      - ./nodes.txt:/etc/easy-proxies/nodes.txt
