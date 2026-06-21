@@ -302,6 +302,12 @@ subscription_refresh:
 
 Supports Base64, plain text, and Clash YAML formats. When subscriptions are configured, fetched nodes are written to `nodes_file`. Subscription changes trigger automatic hot-reload without restart.
 
+**Multi-source Node Merging**: When both `nodes` and `subscriptions` are configured:
+- Inline nodes (defined in `nodes` array) and subscription nodes are merged together
+- Subscription updates preserve inline nodes instead of overwriting them
+- Node order: inline nodes first, followed by subscription nodes
+- Each node's source (inline/subscription) is tracked and displayed in the management UI
+
 ## WebUI Dashboard
 
 Access at `http://your-server:9091` (configurable via the `management` section).

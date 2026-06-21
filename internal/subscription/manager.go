@@ -557,35 +557,53 @@ func (m *Manager) createNewConfig(nodes []config.NodeConfig) *config.Config {
 	// Deep copy base config
 	newCfg := *m.baseCfg
 
+	// Mark all subscription nodes with proper source
+	for i := range nodes {
+		nodes[i].Source = config.NodeSourceSubscription
+	}
+
+	// Preserve inline nodes from base config (nodes defined directly in config.yaml)
+	var inlineNodes []config.NodeConfig
+	for _, node := range m.baseCfg.Nodes {
+		if node.Source == config.NodeSourceInline {
+			inlineNodes = append(inlineNodes, node)
+		}
+	}
+
+	// Merge inline nodes with subscription nodes: inline nodes first, then subscription nodes
+	mergedNodes := make([]config.NodeConfig, 0, len(inlineNodes)+len(nodes))
+	mergedNodes = append(mergedNodes, inlineNodes...)
+	mergedNodes = append(mergedNodes, nodes...)
+
 	// Assign port numbers to nodes in multi-port mode
 	if newCfg.Mode == "multi-port" {
 		portCursor := newCfg.MultiPort.BasePort
-		for i := range nodes {
-			nodes[i].Port = portCursor
+		for i := range mergedNodes {
+			mergedNodes[i].Port = portCursor
 			portCursor++
 			// Apply default credentials
-			if nodes[i].Username == "" {
-				nodes[i].Username = newCfg.MultiPort.Username
-				nodes[i].Password = newCfg.MultiPort.Password
+			if mergedNodes[i].Username == "" {
+				mergedNodes[i].Username = newCfg.MultiPort.Username
+				mergedNodes[i].Password = newCfg.MultiPort.Password
 			}
 		}
 	}
 
 	// Process node names
-	for i := range nodes {
-		nodes[i].Name = strings.TrimSpace(nodes[i].Name)
-		nodes[i].URI = strings.TrimSpace(nodes[i].URI)
+	for i := range mergedNodes {
+		mergedNodes[i].Name = strings.TrimSpace(mergedNodes[i].Name)
+		mergedNodes[i].URI = strings.TrimSpace(mergedNodes[i].URI)
 
 		// Auto-extract name from URI if not provided
-		if nodes[i].Name == "" {
-			nodes[i].Name = config.ExtractNodeName(nodes[i].URI)
+		if mergedNodes[i].Name == "" {
+			mergedNodes[i].Name = config.ExtractNodeName(mergedNodes[i].URI)
 		}
-		if nodes[i].Name == "" {
-			nodes[i].Name = fmt.Sprintf("node-%d", i)
+		if mergedNodes[i].Name == "" {
+			mergedNodes[i].Name = fmt.Sprintf("node-%d", i)
 		}
 	}
 
-	newCfg.Nodes = nodes
+	newCfg.Nodes = mergedNodes
 	return &newCfg
 }
 
