@@ -145,10 +145,51 @@ type NodeConfig struct {
 	Source   NodeSource `yaml:"-" json:"source,omitempty"` // Runtime only, not persisted
 }
 
-// NodeKey returns a unique identifier for the node based on its URI.
-// This is used to preserve port assignments across reloads.
+// NodeKey returns a stable identifier for the node, used to preserve port
+// assignments across subscription refreshes and reloads.
+//
+// The identity deliberately ignores the parts of a proxy URI that subscription
+// providers commonly mutate without changing the underlying server: the
+// display name (#fragment) and query-parameter ordering. As long as the
+// scheme, credentials, host, port and parameter set are unchanged, a node
+// keeps the same key — and therefore the same proxy port.
 func (n *NodeConfig) NodeKey() string {
-	return n.URI
+	return stableNodeKey(n.URI)
+}
+
+// stableNodeKey derives a port-stable identity from a proxy URI by stripping the
+// volatile display name and canonicalizing query order. It never errors: on any
+// parse failure it falls back to the raw URI minus its fragment, so the result
+// is always at least as stable as the previous full-URI behavior.
+func stableNodeKey(uri string) string {
+	uri = strings.TrimSpace(uri)
+	if uri == "" {
+		return ""
+	}
+
+	// vmess:// is base64-encoded JSON rather than a standard URL; only strip an
+	// appended fragment and keep the payload as the identity.
+	if strings.HasPrefix(uri, "vmess://") {
+		if idx := strings.Index(uri, "#"); idx != -1 {
+			return strings.TrimSpace(uri[:idx])
+		}
+		return uri
+	}
+
+	u, err := url.Parse(uri)
+	if err != nil {
+		if idx := strings.LastIndex(uri, "#"); idx != -1 {
+			return strings.TrimSpace(uri[:idx])
+		}
+		return uri
+	}
+
+	u.Fragment = "" // display name — volatile, not part of node identity
+	if u.RawQuery != "" {
+		// Encode() sorts keys, so reordered parameters yield the same key.
+		u.RawQuery = u.Query().Encode()
+	}
+	return u.String()
 }
 
 // Load reads YAML config from disk and applies defaults/validation.
@@ -172,6 +213,12 @@ func Load(path string) (*Config, error) {
 	if err := cfg.normalize(); err != nil {
 		return nil, err
 	}
+
+	// Restore persisted proxy ports so a restart keeps the same port per node.
+	if err := cfg.applyPersistedPorts(); err != nil {
+		return nil, err
+	}
+
 	return &cfg, nil
 }
 
@@ -439,6 +486,91 @@ func (c *Config) BuildPortMap() map[string]uint16 {
 		}
 	}
 	return portMap
+}
+
+// nodePortMapFile is the sidecar file storing node→port assignments so they
+// survive a process restart.
+const nodePortMapFile = "node_ports.json"
+
+// portMapPath returns the path of the port-map sidecar, located next to the
+// main config file. It is empty when the config path is unknown.
+func (c *Config) portMapPath() string {
+	if c.filePath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(c.filePath), nodePortMapFile)
+}
+
+// loadNodePortMap reads a previously saved stableNodeKey→port mapping. It
+// returns nil on any error (missing file, unreadable, bad JSON); callers treat
+// that as "no persisted ports", so a corrupt sidecar never blocks startup.
+func loadNodePortMap(path string) map[string]uint16 {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var m map[string]uint16
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+// SaveNodePortMap persists the current node→port assignments next to the config
+// file so a restart can restore them. It is a no-op in pool mode, where nodes
+// have no per-node ports.
+func (c *Config) SaveNodePortMap() error {
+	if c == nil {
+		return errors.New("config is nil")
+	}
+	if c.Mode != "multi-port" && c.Mode != "hybrid" {
+		return nil
+	}
+	path := c.portMapPath()
+	if path == "" {
+		return errors.New("config file path is unknown")
+	}
+	data, err := json.MarshalIndent(c.BuildPortMap(), "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode port map: %w", err)
+	}
+	if err := writeFileWithLock(path, data, 0o644); err != nil {
+		return fmt.Errorf("write port map %q: %w", path, err)
+	}
+	return nil
+}
+
+// applyPersistedPorts restores the on-disk node→port mapping so a restart keeps
+// every node on the proxy port it previously used, then rewrites the mapping so
+// the sidecar exists from first boot and drops entries for removed nodes.
+//
+// It clears the provisional ports assigned by normalize() first, making
+// NormalizeWithPortMap the single, collision-safe authority: nodes whose stable
+// identity matches a saved entry get their saved port, and the rest get fresh,
+// non-conflicting ports. A corrupt or missing sidecar simply means "no saved
+// ports" and the freshly assigned ports stand.
+func (c *Config) applyPersistedPorts() error {
+	if c.Mode != "multi-port" && c.Mode != "hybrid" {
+		return nil
+	}
+	if saved := loadNodePortMap(c.portMapPath()); len(saved) > 0 {
+		for i := range c.Nodes {
+			c.Nodes[i].Port = 0
+		}
+		if err := c.NormalizeWithPortMap(saved); err != nil {
+			return fmt.Errorf("restore persisted ports: %w", err)
+		}
+	}
+	// Persisting is best-effort by design: the proxy runs correctly without the
+	// sidecar; only a subsequent restart would re-derive ports. A write failure
+	// is logged rather than fatal.
+	if err := c.SaveNodePortMap(); err != nil {
+		log.Printf("⚠️  Failed to persist node ports: %v", err)
+	}
+	return nil
 }
 
 // NormalizeWithPortMap applies defaults and validation, preserving port assignments

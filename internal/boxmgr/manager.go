@@ -848,14 +848,25 @@ func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]ui
 		return errors.New("new config is nil")
 	}
 
-	// Apply port mapping to preserve existing node ports
-	if portMap != nil && len(portMap) > 0 {
-		if err := newCfg.NormalizeWithPortMap(portMap); err != nil {
-			return fmt.Errorf("normalize config with port map: %w", err)
-		}
+	// Apply port mapping and assign ports. NormalizeWithPortMap preserves the
+	// port of any node present in portMap and assigns fresh, collision-free
+	// ports to the rest. It is always run (an empty map simply means "assign
+	// all ports fresh"), since createNewConfig no longer pre-assigns them.
+	if err := newCfg.NormalizeWithPortMap(portMap); err != nil {
+		return fmt.Errorf("normalize config with port map: %w", err)
 	}
 
-	return m.Reload(newCfg)
+	if err := m.Reload(newCfg); err != nil {
+		return err
+	}
+
+	// Persist the (possibly updated) assignments so a restart keeps the same
+	// port per node. Best-effort: a write failure does not affect the running
+	// proxy, only the next restart's ability to restore ports.
+	if err := newCfg.SaveNodePortMap(); err != nil {
+		m.logger.Warnf("failed to persist node ports: %v", err)
+	}
+	return nil
 }
 
 // CurrentPortMap returns the current port mapping from the active configuration.

@@ -575,19 +575,12 @@ func (m *Manager) createNewConfig(nodes []config.NodeConfig) *config.Config {
 	mergedNodes = append(mergedNodes, inlineNodes...)
 	mergedNodes = append(mergedNodes, nodes...)
 
-	// Assign port numbers to nodes in multi-port mode
-	if newCfg.Mode == "multi-port" {
-		portCursor := newCfg.MultiPort.BasePort
-		for i := range mergedNodes {
-			mergedNodes[i].Port = portCursor
-			portCursor++
-			// Apply default credentials
-			if mergedNodes[i].Username == "" {
-				mergedNodes[i].Username = newCfg.MultiPort.Username
-				mergedNodes[i].Password = newCfg.MultiPort.Password
-			}
-		}
-	}
+	// Port and credential assignment is owned by NormalizeWithPortMap (invoked
+	// via ReloadWithPortMap): it preserves the port of any node whose stable
+	// identity is unchanged and assigns fresh, collision-free ports to the rest.
+	// Pre-assigning sequential ports here would override that preservation and
+	// could collide with a preserved port, so it is intentionally left to the
+	// normalize step.
 
 	// Process node names
 	for i := range mergedNodes {
