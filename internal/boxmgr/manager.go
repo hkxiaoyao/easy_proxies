@@ -408,6 +408,21 @@ func (m *Manager) startGeoIPRouter(ctx context.Context, cfg *config.Config) {
 	m.mu.Unlock()
 }
 
+// newBoxRecover wraps box.New and converts panics into errors. Some malformed
+// subscription nodes make the sing-box library panic during outbound
+// initialization (e.g. stringifying an unexpected *string while formatting its
+// own error) instead of returning an error. Without this guard such a node
+// crashes the whole process and the service never starts.
+func newBoxRecover(opts box.Options) (instance *box.Box, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			instance = nil
+			err = fmt.Errorf("sing-box panicked during initialization: %v", r)
+		}
+	}()
+	return box.New(opts)
+}
+
 // createBox builds a sing-box instance from config.
 // It retries automatically when individual outbounds fail sing-box validation,
 // removing the offending outbound each time.
@@ -438,7 +453,7 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 		boxCtx := box.Context(ctx, inboundRegistry, outboundRegistry, endpointRegistry, dnsRegistry, serviceRegistry)
 		boxCtx = monitor.ContextWith(boxCtx, m.monitorMgr)
 
-		instance, err := box.New(box.Options{Context: boxCtx, Options: opts})
+		instance, err := newBoxRecover(box.Options{Context: boxCtx, Options: opts})
 		if err == nil {
 			if attempt > 0 {
 				log.Printf("✅ sing-box instance created after removing %d invalid outbound(s)", attempt)

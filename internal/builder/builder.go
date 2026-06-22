@@ -564,7 +564,15 @@ func buildVLESSOptions(u *url.URL, skipCertVerify bool) (option.VLESSOutboundOpt
 		opts.Flow = flow
 	}
 	if packetEncoding := query.Get("packetEncoding"); packetEncoding != "" {
-		opts.PacketEncoding = &packetEncoding
+		// sing-box only accepts "packetaddr" or "xudp"; any other value makes
+		// sing-box panic while formatting the error (it stringifies a *string).
+		// Reject unknown values here so the node is skipped instead of crashing.
+		switch packetEncoding {
+		case "packetaddr", "xudp":
+			opts.PacketEncoding = &packetEncoding
+		default:
+			return option.VLESSOutboundOptions{}, fmt.Errorf("unsupported packetEncoding: %s", packetEncoding)
+		}
 	}
 	if transport, err := buildV2RayTransport(query); err != nil {
 		return option.VLESSOutboundOptions{}, err
