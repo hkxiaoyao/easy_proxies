@@ -3,6 +3,7 @@ package pool
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"math/rand"
@@ -269,7 +270,7 @@ func (p *poolOutbound) initializeMembersLocked() error {
 
 // probeAllMembersOnStartup performs initial health checks on all members
 func (p *poolOutbound) probeAllMembersOnStartup() {
-	destination, ok := p.monitor.DestinationForProbe()
+	destination, host, useTLS, ok := p.monitor.DestinationForProbe()
 	if !ok {
 		p.logger.Warn("probe target not configured, skipping initial health check")
 		// 没有配置探测目标时，标记所有节点为可用
@@ -317,6 +318,14 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 				return
 			}
 
+			// Strict mode: upgrade to TLS and verify the certificate chain so
+			// that nodes whose exit hijacks TLS fail the startup probe too.
+			if conn, err = upgradeProbeConn(ctx, conn, host, useTLS); err != nil {
+				conn.Close()
+				results <- probeResult{member: m, err: err}
+				return
+			}
+
 			_, err = httpProbe(conn, destination.AddrString())
 			conn.Close()
 			if err != nil {
@@ -334,7 +343,7 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 	for i := 0; i < len(members); i++ {
 		res := <-results
 		if res.err != nil {
-			p.logger.Warn("initial probe failed for ", res.member.tag, ": ", res.err)
+			p.logger.Warn("initial probe failed: ", monitor.FormatProbeFailure(res.member.tag, p.options.Metadata[res.member.tag].URI, res.err))
 			failedCount++
 			if res.member.shared != nil {
 				res.member.shared.recordFailure(res.err, 1, p.options.BlacklistDuration)
@@ -730,6 +739,28 @@ func (p *poolOutbound) makeReleaseFunc(member *memberState) func() {
 	}
 }
 
+// upgradeProbeConn optionally upgrades a plain TCP connection to TLS with
+// strict certificate verification. When useTLS is false the connection is
+// returned unchanged. host is used as the TLS SNI. A handshake failure
+// (e.g. self-signed or hijacked certificate) is returned as an error so the
+// caller can record it and eventually blacklist the node.
+func upgradeProbeConn(ctx context.Context, conn net.Conn, host string, useTLS bool) (net.Conn, error) {
+	if !useTLS {
+		return conn, nil
+	}
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName:         host,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: false,
+	})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		// Return the original connection so the caller's deferred Close keeps
+		// working; the failed handshake did not take over its lifetime.
+		return conn, fmt.Errorf("tls handshake: %w", err)
+	}
+	return tlsConn, nil
+}
+
 // httpProbe performs an HTTP probe through the connection and measures TTFB.
 // It sends a minimal HTTP request and waits for the first byte of response.
 func httpProbe(conn net.Conn, host string) (time.Duration, error) {
@@ -766,7 +797,7 @@ func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Conte
 	if p.monitor == nil {
 		return nil
 	}
-	destination, ok := p.monitor.DestinationForProbe()
+	destination, host, useTLS, ok := p.monitor.DestinationForProbe()
 	if !ok {
 		return nil
 	}
@@ -780,6 +811,15 @@ func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Conte
 			return 0, err
 		}
 		defer conn.Close()
+
+		// Strict mode: upgrade to TLS and verify the certificate chain so that
+		// nodes whose exit hijacks TLS (self-signed certs) fail the probe.
+		if conn, err = upgradeProbeConn(ctx, conn, host, useTLS); err != nil {
+			if member.entry != nil {
+				member.entry.RecordFailure(err)
+			}
+			return 0, err
+		}
 
 		// Perform HTTP probe to measure actual latency (TTFB)
 		_, err = httpProbe(conn, destination.AddrString())
@@ -810,7 +850,7 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) 
 	if p.monitor == nil {
 		return nil
 	}
-	destination, ok := p.monitor.DestinationForProbe()
+	destination, host, useTLS, ok := p.monitor.DestinationForProbe()
 	if !ok {
 		return nil
 	}
@@ -847,6 +887,15 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) 
 			return 0, err
 		}
 		defer conn.Close()
+
+		// Strict mode: upgrade to TLS and verify the certificate chain so that
+		// nodes whose exit hijacks TLS (self-signed certs) fail the probe.
+		if conn, err = upgradeProbeConn(ctx, conn, host, useTLS); err != nil {
+			if member.entry != nil {
+				member.entry.RecordFailure(err)
+			}
+			return 0, err
+		}
 
 		// Perform HTTP probe to measure actual latency (TTFB)
 		_, err = httpProbe(conn, destination.AddrString())

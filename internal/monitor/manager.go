@@ -97,15 +97,17 @@ type entry struct {
 
 // Manager aggregates all node states for the UI/API.
 type Manager struct {
-	cfg               Config
-	probeDst          M.Socksaddr
-	probeReady        bool
-	probeConcurrency  int
-	mu                sync.RWMutex
-	nodes             map[string]*entry
-	ctx               context.Context
-	cancel            context.CancelFunc
-	logger            Logger
+	cfg              Config
+	probeDst         M.Socksaddr
+	probeHost        string // probe target hostname (TLS SNI when probeTLS is true)
+	probeTLS         bool   // strict mode: probe via TLS with certificate verification
+	probeReady       bool
+	probeConcurrency int
+	mu               sync.RWMutex
+	nodes            map[string]*entry
+	ctx              context.Context
+	cancel           context.CancelFunc
+	logger           Logger
 }
 
 // Logger interface for logging
@@ -126,6 +128,9 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 	if cfg.ProbeTarget != "" {
 		target := cfg.ProbeTarget
+		// Remember the scheme: an https target can be probed with strict TLS
+		// certificate verification when skip_cert_verify is disabled.
+		isHTTPS := strings.HasPrefix(target, "https://")
 		// Strip URL scheme if present (e.g., "https://www.google.com:443" -> "www.google.com:443")
 		if strings.HasPrefix(target, "https://") {
 			target = strings.TrimPrefix(target, "https://")
@@ -139,7 +144,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		host, port, err := net.SplitHostPort(target)
 		if err != nil {
 			// If no port specified, use default based on original scheme
-			if strings.HasPrefix(cfg.ProbeTarget, "https://") {
+			if isHTTPS {
 				host = target
 				port = "443"
 			} else {
@@ -149,7 +154,13 @@ func NewManager(cfg Config) (*Manager, error) {
 		}
 		parsed := M.ParseSocksaddrHostPort(host, parsePort(port))
 		m.probeDst = parsed
+		m.probeHost = host
 		m.probeReady = true
+		// Strict mode: verify the TLS certificate chain during probe so nodes
+		// whose exit hijacks TLS with self-signed certs are detected and
+		// eventually blacklisted. Enabled only when skip_cert_verify is off
+		// and the target scheme is https.
+		m.probeTLS = isHTTPS && !cfg.SkipCertVerify
 	}
 	return m, nil
 }
@@ -257,6 +268,7 @@ func (m *Manager) probeAllNodes(timeout time.Duration) {
 			cancel()
 
 			entry.mu.Lock()
+			uri := entry.info.URI
 			if err != nil {
 				failedCount.Add(1)
 				entry.lastError = err.Error()
@@ -273,7 +285,7 @@ func (m *Manager) probeAllNodes(timeout time.Duration) {
 			entry.mu.Unlock()
 
 			if err != nil && m.logger != nil {
-				m.logger.Warn("probe failed for ", tag, ": ", err)
+				m.logger.Warn("probe failed: ", FormatProbeFailure(tag, uri, err))
 			}
 		}(e, probeFn, tag)
 	}
@@ -325,11 +337,13 @@ func (m *Manager) ClearNodes() {
 }
 
 // DestinationForProbe exposes the configured destination for health checks.
-func (m *Manager) DestinationForProbe() (M.Socksaddr, bool) {
+// host is the probe target's hostname (used as TLS SNI); useTLS is true when
+// the probe must perform a TLS handshake with strict certificate verification.
+func (m *Manager) DestinationForProbe() (dest M.Socksaddr, host string, useTLS bool, ok bool) {
 	if !m.probeReady {
-		return M.Socksaddr{}, false
+		return M.Socksaddr{}, "", false, false
 	}
-	return m.probeDst, true
+	return m.probeDst, m.probeHost, m.probeTLS, true
 }
 
 // Snapshot returns a sorted copy of current node states.
