@@ -32,19 +32,15 @@ func nodeBrief(uri string) string {
 // parsing opaque sing-box / net error strings.
 //
 // Cases are matched top-down; more specific signatures must come before generic
-// ones (probe cancellation before timeouts, transport handshake before a bare
-// status code, dial-stage failures before read-stage timeouts).
+// ones (transport handshake before a bare status code, dial-stage failures
+// before read-stage timeouts, and a bare "context canceled" last so a per-probe
+// deadline is classified as a node fault rather than a cancellation).
 func classifyProbeError(err error) (category, summary string) {
 	if err == nil {
 		return "", ""
 	}
 	s := err.Error()
 	switch {
-	// Probe was cancelled (overall batch deadline or client disconnect), not a
-	// node fault. Checked first so it isn't misread as a slow-link read timeout.
-	case strings.Contains(s, "context deadline exceeded") || strings.Contains(s, "context canceled"):
-		return "cancelled", "探测被取消(批量超时或连接中断,非节点故障)"
-
 	// Placeholder address left by broken subscription parsing. Only the sentinel
 	// 127.127.127.1 is treated as a parse artifact; a genuine 127.0.0.1 dial
 	// error falls through to the dial-stage bucket below for an accurate cause.
@@ -90,6 +86,14 @@ func classifyProbeError(err error) (category, summary string) {
 	case strings.Contains(s, "EOF") || strings.Contains(s, "reset by peer") ||
 		strings.Contains(s, "broken pipe") || strings.Contains(s, "connection reset"):
 		return "conn_reset", "连接被对端中断(EOF,节点异常或疑似劫持)"
+
+	// True cancellation with no transport-stage signal: the batch deadline
+	// cascaded or the client disconnected mid-probe. Checked LAST and limited to
+	// "context canceled" — a "context deadline exceeded" is NOT excused here, it
+	// is matched above as dial_timeout / read_timeout because a per-probe deadline
+	// expiring is a genuine node fault (unreachable or too slow), not a non-fault.
+	case strings.Contains(s, "context canceled"):
+		return "cancelled", "探测被取消(批量超时或连接中断,非节点故障)"
 
 	default:
 		return "other", "探测失败(未知原因)"
